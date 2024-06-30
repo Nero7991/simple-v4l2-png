@@ -64,7 +64,7 @@ static void process_image(const void *p, int size, const char *filename, int wid
 
     png_init_io(png, fp);
 
-    png_set_IHDR(png, info, width, height, 16, PNG_COLOR_TYPE_RGB,
+    png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGB,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
     png_write_info(png, info);
     png_bytep row = (png_bytep)malloc(3 * width * sizeof(uint8_t));
@@ -183,7 +183,7 @@ int main() {
     CLEAR(streamparm);
     streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     streamparm.parm.capture.timeperframe.numerator = 1;
-    streamparm.parm.capture.timeperframe.denominator = 30;
+    streamparm.parm.capture.timeperframe.denominator = 15;
 
     if (-1 == ioctl(fd, VIDIOC_S_PARM, &streamparm)) {
         perror("VIDIOC_S_PARM");
@@ -276,7 +276,7 @@ int main() {
     }
     printf("Stream started successfully\n");
 
-    sleep(2);
+    sleep(1);
 
     FD_ZERO(&fds);
     FD_SET(fd, &fds);
