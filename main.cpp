@@ -27,6 +27,7 @@
 #include <linux/videodev2.h>
 #include <png.h>
 #include <stdint.h>
+#include <cerrno>
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
 
@@ -35,7 +36,7 @@ struct buffer {
     size_t length;
 };
 
-static void process_image(const void *p, int size, const char *filename) {
+static void process_image(const void *p, int size, const char *filename, int width, int height) {
     FILE *fp = fopen(filename, "wb");
     if (!fp) {
         perror("Error opening output file");
@@ -63,28 +64,46 @@ static void process_image(const void *p, int size, const char *filename) {
 
     png_init_io(png, fp);
 
-    // Assuming 1280x720 resolution, adjust as needed
-    int width = 1280;
-    int height = 720;
-
     png_set_IHDR(png, info, width, height, 16, PNG_COLOR_TYPE_RGB,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
     png_write_info(png, info);
+    png_bytep row = (png_bytep)malloc(3 * width * sizeof(uint8_t));
+    if (!row) {
+        perror("Error allocating memory for row");
+        png_destroy_write_struct(&png, &info);
+        fclose(fp);
+        exit(EXIT_FAILURE);
+    }
 
-    png_bytep row = static_cast<png_bytep>(malloc(3 * width * sizeof(uint16_t)));
-
-    // Convert RG10 to RGB16
+    const uint16_t *src = (const uint16_t *)p;
     for (int y = 0; y < height; y++) {
-        const uint16_t *src = static_cast<const uint16_t*>(p) + y * width;
-        uint16_t *dst = reinterpret_cast<uint16_t*>(row);
         for (int x = 0; x < width; x++) {
-            uint16_t r = src[x] & 0x03FF;
-            uint16_t g = (src[x] >> 10) & 0x03FF;
-            uint16_t b = src[x + 1] & 0x03FF;
+            uint16_t r, g, b;
+            if (y % 2 == 0) {
+                if (x % 2 == 0) {
+                    r = src[y * width + x] & 0x03FF;
+                    g = (src[y * width + x + 1] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
+                    b = src[(y + 1) * width + x + 1] & 0x03FF;
+                } else {
+                    r = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                    g = src[y * width + x] & 0x03FF;
+                    b = (src[(y + 1) * width + x - 1] & 0x03FF + src[(y + 1) * width + x + 1] & 0x03FF) / 2;
+                }
+            } else {
+                if (x % 2 == 0) {
+                    r = (src[(y - 1) * width + x] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
+                    g = src[y * width + x] & 0x03FF;
+                    b = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                } else {
+                    r = src[(y - 1) * width + x + 1] & 0x03FF;
+                    g = (src[(y - 1) * width + x] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                    b = src[y * width + x] & 0x03FF;
+                }
+            }
             
-            dst[3 * x] = r << 6;
-            dst[3 * x + 1] = g << 6;
-            dst[3 * x + 2] = b << 6;
+            row[x * 3] = (r * 255) / 1023;
+            row[x * 3 + 1] = (g * 255) / 1023;
+            row[x * 3 + 2] = (b * 255) / 1023;
         }
         png_write_row(png, row);
     }
@@ -133,8 +152,8 @@ int main() {
     // Set format
     CLEAR(fmt);
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width       = 1280;
-    fmt.fmt.pix.height      = 720;
+    fmt.fmt.pix.width       = 1920;
+    fmt.fmt.pix.height      = 1080;
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SRGGB10;
     fmt.fmt.pix.field       = V4L2_FIELD_NONE;
 
@@ -320,7 +339,7 @@ int main() {
     printf("Buffer dequeued successfully\n");
 
     snprintf(out_name, sizeof(out_name), "output_%ld.png", buf.timestamp.tv_sec);
-    process_image(buffers[buf.index].start, buf.bytesused, out_name);
+    process_image(buffers[buf.index].start, buf.bytesused, out_name, fmt.fmt.pix.width, fmt.fmt.pix.height);
 
     printf("Queueing buffer...\n");
     if (-1 == ioctl(fd, VIDIOC_QBUF, &buf)) {
