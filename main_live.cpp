@@ -28,81 +28,14 @@
 #include <png.h>
 #include <stdint.h>
 #include <cerrno>
-#include <stdint.h>
-#include <stdlib.h>
-#include <math.h>
-#include <png.h>
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
 
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MAX(a,b) (((a)>(b))?(a):(b))
-
-void ahd_debayer(const uint16_t *src, uint8_t *row, int width, int height, int y)
-{
-    // Temporary buffers for horizontal and vertical interpolations
-    uint16_t *h_interp = (uint16_t *)malloc(width * 3 * sizeof(uint16_t));
-    uint16_t *v_interp = (uint16_t *)malloc(width * 3 * sizeof(uint16_t));
-
-    // Perform horizontal and vertical interpolations
-    for (int x = 0; x < width; x++) {
-        int is_green = ((x + y) % 2 == 0);
-        int is_blue = (y % 2 == 1 && x % 2 == 0);
-        int is_red = (y % 2 == 0 && x % 2 == 1);
-
-        // Horizontal interpolation
-        if (is_green) {
-            h_interp[x*3 + 1] = src[y * width + x] & 0x03FF;
-            h_interp[x*3 + 0] = (x > 0) ? (src[y * width + x - 1] & 0x03FF) : h_interp[x*3 + 1];
-            h_interp[x*3 + 2] = (x < width - 1) ? (src[y * width + x + 1] & 0x03FF) : h_interp[x*3 + 1];
-        } else if (is_blue) {
-            h_interp[x*3 + 2] = src[y * width + x] & 0x03FF;
-            h_interp[x*3 + 1] = (x > 0 && x < width - 1) ? 
-                ((src[y * width + x - 1] & 0x03FF) + (src[y * width + x + 1] & 0x03FF)) / 2 : h_interp[x*3 + 2];
-            h_interp[x*3 + 0] = h_interp[x*3 + 1];
-        } else { // is_red
-            h_interp[x*3 + 0] = src[y * width + x] & 0x03FF;
-            h_interp[x*3 + 1] = (x > 0 && x < width - 1) ? 
-                ((src[y * width + x - 1] & 0x03FF) + (src[y * width + x + 1] & 0x03FF)) / 2 : h_interp[x*3 + 0];
-            h_interp[x*3 + 2] = h_interp[x*3 + 1];
-        }
-
-        // Vertical interpolation (similar to horizontal, but using y-1 and y+1)
-        if (is_green) {
-            v_interp[x*3 + 1] = src[y * width + x] & 0x03FF;
-            v_interp[x*3 + 0] = (y > 0) ? (src[(y - 1) * width + x] & 0x03FF) : v_interp[x*3 + 1];
-            v_interp[x*3 + 2] = (y < height - 1) ? (src[(y + 1) * width + x] & 0x03FF) : v_interp[x*3 + 1];
-        } else if (is_blue) {
-            v_interp[x*3 + 2] = src[y * width + x] & 0x03FF;
-            v_interp[x*3 + 1] = (y > 0 && y < height - 1) ? 
-                ((src[(y - 1) * width + x] & 0x03FF) + (src[(y + 1) * width + x] & 0x03FF)) / 2 : v_interp[x*3 + 2];
-            v_interp[x*3 + 0] = v_interp[x*3 + 1];
-        } else { // is_red
-            v_interp[x*3 + 0] = src[y * width + x] & 0x03FF;
-            v_interp[x*3 + 1] = (y > 0 && y < height - 1) ? 
-                ((src[(y - 1) * width + x] & 0x03FF) + (src[(y + 1) * width + x] & 0x03FF)) / 2 : v_interp[x*3 + 0];
-            v_interp[x*3 + 2] = v_interp[x*3 + 1];
-        }
-
-        // Calculate homogeneity
-        float h_homogeneity = 0, v_homogeneity = 0;
-        for (int c = 0; c < 3; c++) {
-            h_homogeneity += fabs(h_interp[MAX(0, x-1)*3 + c] - h_interp[x*3 + c]) + 
-                             fabs(h_interp[MIN(width-1, x+1)*3 + c] - h_interp[x*3 + c]);
-            v_homogeneity += fabs(v_interp[MAX(0, x-1)*3 + c] - v_interp[x*3 + c]) + 
-                             fabs(v_interp[MIN(width-1, x+1)*3 + c] - v_interp[x*3 + c]);
-        }
-
-        // Choose interpolation with better homogeneity
-        uint16_t *chosen = (h_homogeneity <= v_homogeneity) ? h_interp : v_interp;
-
-        // Write to output
-        row[x * 3] = chosen[x*3 + 0] >> 2;
-        row[x * 3 + 1] = chosen[x*3 + 1] >> 2;
-        row[x * 3 + 2] = chosen[x*3 + 2] >> 2;
-    }
-
-    free(h_interp);
-    free(v_interp);
-}
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT(fmt, ...)
+#endif
 
 #define CLEAR(x) memset(&(x), 0, sizeof(x))
 
@@ -110,6 +43,45 @@ struct buffer {
     void   *start;
     size_t length;
 };
+
+cv::Mat process_image(const void *p, int width, int height) {
+    cv::Mat rgb_frame(height, width, CV_8UC3);
+    uint8_t* dst = rgb_frame.data;
+
+    const uint16_t *src = (const uint16_t *)p;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            uint16_t r, g, b;
+            if (y % 2 == 0) {
+                if (x % 2 == 0) {
+                    r = src[y * width + x] & 0x03FF;
+                    g = (src[y * width + x + 1] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
+                    b = src[(y + 1) * width + x + 1] & 0x03FF;
+                } else {
+                    r = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                    g = src[y * width + x] & 0x03FF;
+                    b = (src[(y + 1) * width + x - 1] & 0x03FF + src[(y + 1) * width + x + 1] & 0x03FF) / 2;
+                }
+            } else {
+                if (x % 2 == 0) {
+                    r = (src[(y - 1) * width + x] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
+                    g = src[y * width + x] & 0x03FF;
+                    b = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                } else {
+                    r = src[(y - 1) * width + x + 1] & 0x03FF;
+                    g = (src[(y - 1) * width + x] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
+                    b = src[y * width + x] & 0x03FF;
+                }
+            }
+
+            dst[y * width * 3 + x * 3] = (r * 255) / 1023;
+            dst[y * width * 3 + x * 3 + 1] = (g * 255) / 1023;
+            dst[y * width * 3 + x * 3 + 2] = (b * 255) / 1023;
+        }
+    }
+
+    return rgb_frame;
+}
 
 static void process_image(const void *p, int size, const char *filename, int width, int height) {
     FILE *fp = fopen(filename, "wb");
@@ -157,36 +129,28 @@ static void process_image(const void *p, int size, const char *filename, int wid
             if (y % 2 == 0) {
                 if (x % 2 == 0) {
                     r = src[y * width + x] & 0x03FF;
-                    g = (uint16_t)(((uint32_t)(src[y * width + x + (x < width - 1 ? 1 : -1)] & 0x03FF) +
-                        (uint32_t)(src[(y < height - 1 ? y + 1 : y - 1) * width + x] & 0x03FF)) >> 1);
-                    b = src[(y < height - 1 ? y + 1 : y - 1) * width + 
-                            (x < width - 1 ? x + 1 : x - 1)] & 0x03FF;
+                    g = (src[y * width + x + 1] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
+                    b = src[(y + 1) * width + x + 1] & 0x03FF;
                 } else {
-                    r = (uint16_t)(((uint32_t)(src[y * width + x - 1] & 0x03FF) +
-                        (uint32_t)(src[y * width + (x < width - 1 ? x + 1 : x - 1)] & 0x03FF)) >> 1);
+                    r = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
                     g = src[y * width + x] & 0x03FF;
-                    b = (uint16_t)(((uint32_t)(src[(y < height - 1 ? y + 1 : y - 1) * width + x - 1] & 0x03FF) +
-                        (uint32_t)(src[(y < height - 1 ? y + 1 : y - 1) * width + 
-                            (x < width - 1 ? x + 1 : x - 1)] & 0x03FF)) >> 1);
+                    b = (src[(y + 1) * width + x - 1] & 0x03FF + src[(y + 1) * width + x + 1] & 0x03FF) / 2;
                 }
             } else {
                 if (x % 2 == 0) {
-                    r = (uint16_t)(((uint32_t)(src[(y > 0 ? y - 1 : y + 1) * width + x] & 0x03FF) +
-                        (uint32_t)(src[(y < height - 1 ? y + 1 : y) * width + x] & 0x03FF)) >> 1);
+                    r = (src[(y - 1) * width + x] & 0x03FF + src[(y + 1) * width + x] & 0x03FF) / 2;
                     g = src[y * width + x] & 0x03FF;
-                    b = (uint16_t)(((uint32_t)(src[y * width + x - 1] & 0x03FF) +
-                        (uint32_t)(src[y * width + (x < width - 1 ? x + 1 : x - 1)] & 0x03FF)) >> 1);
+                    b = (src[y * width + x - 1] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
                 } else {
-                    r = src[(y > 0 ? y - 1 : 0) * width + 
-                            (x < width - 1 ? x + 1 : x)] & 0x03FF;
-                    g = (uint16_t)(((uint32_t)(src[(y > 0 ? y - 1 : y + 1) * width + x] & 0x03FF) +
-                        (uint32_t)(src[y * width + (x < width - 1 ? x + 1 : x - 1)] & 0x03FF)) >> 1);
+                    r = src[(y - 1) * width + x + 1] & 0x03FF;
+                    g = (src[(y - 1) * width + x] & 0x03FF + src[y * width + x + 1] & 0x03FF) / 2;
                     b = src[y * width + x] & 0x03FF;
                 }
             }
-            row[x * 3] = b;
-            row[x * 3 + 1] = g;
-            row[x * 3 + 2] = r;
+            
+            row[x * 3] = (r * 255) / 1023;
+            row[x * 3 + 1] = (g * 255) / 1023;
+            row[x * 3 + 2] = (b * 255) / 1023;
         }
         png_write_row(png, row);
     }
@@ -197,67 +161,12 @@ static void process_image(const void *p, int size, const char *filename, int wid
     fclose(fp);
 }
 
-static void process_buffer(void *p, int size, int width, int height){
+static void process_buffer(void *p, int width, int height){
     uint16_t *src = (uint16_t *)p;
     for (uint16_t i = 0; i < width * height; i+=1){
         src[i] = src[i] << 6;
     }
 
-}
-
-
-static void process_image_rgb(const char *filename, int width, int height, uint8_t r, uint8_t g, uint8_t b) {
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        perror("Error opening output file");
-        exit(EXIT_FAILURE);
-    }
-    
-    png_structp png = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png) {
-        fclose(fp);
-        exit(EXIT_FAILURE);
-    }
-    
-    png_infop info = png_create_info_struct(png);
-    if (!info) {
-        png_destroy_write_struct(&png, NULL);
-        fclose(fp);
-        exit(EXIT_FAILURE);
-    }
-    
-    if (setjmp(png_jmpbuf(png))) {
-        png_destroy_write_struct(&png, &info);
-        fclose(fp);
-        exit(EXIT_FAILURE);
-    }
-    
-    png_init_io(png, fp);
-    png_set_IHDR(png, info, width, height, 8, PNG_COLOR_TYPE_RGB,
-                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
-    png_write_info(png, info);
-    
-    png_bytep row = (png_bytep)malloc(3 * width * sizeof(uint8_t));
-    if (!row) {
-        perror("Error allocating memory for row");
-        png_destroy_write_struct(&png, &info);
-        fclose(fp);
-        exit(EXIT_FAILURE);
-    }
-    
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            row[x * 3] = r;      // Red channel set to maximum (255)
-            row[x * 3 + 1] = g;    // Green channel set to 0
-            row[x * 3 + 2] = b;    // Blue channel set to 0
-        }
-        png_write_row(png, row);
-    }
-    
-    free(row);
-    png_write_end(png, NULL);
-    png_destroy_write_struct(&png, &info);
-    fclose(fp);
 }
 
 int main() {
@@ -422,16 +331,40 @@ int main() {
     }
     printf("Stream started successfully\n");
 
-    sleep(1);
+    // Create a window to display the video
+    cv::namedWindow("Live Video", cv::WINDOW_NORMAL);
 
-    FD_ZERO(&fds);
-    FD_SET(fd, &fds);
+    // Enable auto controls
+    v4l2_control ctrl;
 
-    tv.tv_sec = 10;  // Increase timeout to 10 seconds
-    tv.tv_usec = 0;
+    // Auto gain
+    ctrl.id = V4L2_CID_AUTOGAIN;
+    ctrl.value = 1;
+    if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) == -1) {
+        perror("Failed to set auto gain");
+    }
 
-    for (int attempt = 0; attempt < 5; attempt++) {
-        printf("Attempt %d: Waiting for frame (timeout: %ld seconds)...\n", attempt + 1, tv.tv_sec);
+    // Auto exposure
+    ctrl.id = V4L2_CID_EXPOSURE_AUTO;
+    ctrl.value = V4L2_EXPOSURE_AUTO;
+    if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) == -1) {
+        perror("Failed to set auto exposure");
+    }
+
+    // Auto white balance
+    ctrl.id = V4L2_CID_AUTO_WHITE_BALANCE;
+    ctrl.value = 1;
+    if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) == -1) {
+        perror("Failed to set auto white balance");
+    }
+
+    while (true) {
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+
+        tv.tv_sec = 1;
+        tv.tv_usec = 0;
+
         r = select(fd + 1, &fds, NULL, NULL, &tv);
 
         if (-1 == r) {
@@ -441,59 +374,120 @@ int main() {
 
         if (0 == r) {
             fprintf(stderr, "select timeout\n");
-        } else {
-            printf("Frame is ready\n");
+            continue;
+        }
+
+        CLEAR(buf);
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        buf.memory = V4L2_MEMORY_MMAP;
+
+        if (-1 == ioctl(fd, VIDIOC_DQBUF, &buf)) {
+            perror("VIDIOC_DQBUF");
+            exit(EXIT_FAILURE);
+        }
+
+        //process_buffer(buffers[buf.index].start, fmt.fmt.pix.width, fmt.fmt.pix.height);
+
+        // Process the image and display it in the window
+        cv::Mat bayer_frame(fmt.fmt.pix.height, fmt.fmt.pix.width, CV_16UC1, buffers[buf.index].start);
+        cv::Mat rgb_frame;
+
+        for(int i = 0; i < bayer_frame.rows; i++)
+            for(int j = 0; j < bayer_frame.cols; j++)
+                bayer_frame.at<uint16_t>(i,j) = bayer_frame.at<uint16_t>(i,j) << 6;
+
+        cv::cvtColor(bayer_frame, rgb_frame, cv::COLOR_BayerRG2RGB);
+
+        // Resize to 720p (1280x720)
+        cv::Mat resized_frame;
+        //cv::resize(process_image(buffers[buf.index].start, fmt.fmt.pix.width, fmt.fmt.pix.height), resized_frame, cv::Size(1280, 720), 0, 0, cv::INTER_LINEAR);
+        cv::resize(rgb_frame, resized_frame, cv::Size(1280, 720), 0, 0, cv::INTER_LINEAR);
+
+        cv::imshow("Live Video", resized_frame);
+
+        if (-1 == ioctl(fd, VIDIOC_QBUF, &buf)) {
+            perror("VIDIOC_QBUF");
+            exit(EXIT_FAILURE);
+        }
+
+        // Exit the loop if 'q' is pressed
+        if (cv::waitKey(1) == 'q') {
             break;
         }
-
-        // Check stream status
-        v4l2_input input;
-        CLEAR(input);
-        if (-1 == ioctl(fd, VIDIOC_G_INPUT, &input.index)) {
-            perror("VIDIOC_G_INPUT");
-        } else if (-1 == ioctl(fd, VIDIOC_ENUMINPUT, &input)) {
-            perror("VIDIOC_ENUMINPUT");
-        } else {
-            printf("Current input status: 0x%08X\n", input.status);
-        }
     }
 
-    if (r == 0) {
-        int flags = fcntl(fd, F_GETFL, 0);
-        printf("File descriptor flags: %d\n", flags);
-        char buffer[4096];
-        ssize_t bytes_read = read(fd, buffer, sizeof(buffer));
-        if (bytes_read == -1) {
-            perror("read");
-        } else if (bytes_read == 0) {
-            printf("End of file reached\n");
-        } else {
-            printf("Read %zd bytes from device\n", bytes_read);
-        }
-        exit(EXIT_FAILURE);
-    }
 
-    CLEAR(buf);
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
+    // sleep(1);
 
-    printf("Dequeuing buffer...\n");
-    if (-1 == ioctl(fd, VIDIOC_DQBUF, &buf)) {
-        perror("VIDIOC_DQBUF");
-        exit(EXIT_FAILURE);
-    }
-    printf("Buffer dequeued successfully\n");
+    // FD_ZERO(&fds);
+    // FD_SET(fd, &fds);
 
-    snprintf(out_name, sizeof(out_name), "output_%ld.png", buf.timestamp.tv_sec);
-    process_image(buffers[buf.index].start, buf.bytesused, out_name, fmt.fmt.pix.width, fmt.fmt.pix.height);
-    // process_image_rgb(out_name, fmt.fmt.pix.width, fmt.fmt.pix.height, 0, 0, 0xFF);
+    // tv.tv_sec = 10;  // Increase timeout to 10 seconds
+    // tv.tv_usec = 0;
 
-    printf("Queueing buffer...\n");
-    if (-1 == ioctl(fd, VIDIOC_QBUF, &buf)) {
-        perror("VIDIOC_QBUF");
-        exit(EXIT_FAILURE);
-    }
-    printf("Buffer queued successfully\n");
+    // for (int attempt = 0; attempt < 5; attempt++) {
+    //     printf("Attempt %d: Waiting for frame (timeout: %ld seconds)...\n", attempt + 1, tv.tv_sec);
+    //     r = select(fd + 1, &fds, NULL, NULL, &tv);
+
+    //     if (-1 == r) {
+    //         perror("select");
+    //         exit(EXIT_FAILURE);
+    //     }
+
+    //     if (0 == r) {
+    //         fprintf(stderr, "select timeout\n");
+    //     } else {
+    //         printf("Frame is ready\n");
+    //         break;
+    //     }
+
+    //     // Check stream status
+    //     v4l2_input input;
+    //     CLEAR(input);
+    //     if (-1 == ioctl(fd, VIDIOC_G_INPUT, &input.index)) {
+    //         perror("VIDIOC_G_INPUT");
+    //     } else if (-1 == ioctl(fd, VIDIOC_ENUMINPUT, &input)) {
+    //         perror("VIDIOC_ENUMINPUT");
+    //     } else {
+    //         printf("Current input status: 0x%08X\n", input.status);
+    //     }
+    // }
+
+    // if (r == 0) {
+    //     int flags = fcntl(fd, F_GETFL, 0);
+    //     printf("File descriptor flags: %d\n", flags);
+    //     char buffer[4096];
+    //     ssize_t bytes_read = read(fd, buffer, sizeof(buffer));
+    //     if (bytes_read == -1) {
+    //         perror("read");
+    //     } else if (bytes_read == 0) {
+    //         printf("End of file reached\n");
+    //     } else {
+    //         printf("Read %zd bytes from device\n", bytes_read);
+    //     }
+    //     exit(EXIT_FAILURE);
+    // }
+
+    // CLEAR(buf);
+    // buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    // buf.memory = V4L2_MEMORY_MMAP;
+
+    // printf("Dequeuing buffer...\n");
+    // if (-1 == ioctl(fd, VIDIOC_DQBUF, &buf)) {
+    //     perror("VIDIOC_DQBUF");
+    //     exit(EXIT_FAILURE);
+    // }
+    // printf("Buffer dequeued successfully\n");
+
+    // snprintf(out_name, sizeof(out_name), "output_%ld.png", buf.timestamp.tv_sec);
+    // process_image(buffers[buf.index].start, buf.bytesused, out_name, fmt.fmt.pix.width, fmt.fmt.pix.height);
+
+    // printf("Queueing buffer...\n");
+    // if (-1 == ioctl(fd, VIDIOC_QBUF, &buf)) {
+    //     perror("VIDIOC_QBUF");
+    //     exit(EXIT_FAILURE);
+    // }
+    // printf("Buffer queued successfully\n");
 
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     printf("Stopping stream...\n");
